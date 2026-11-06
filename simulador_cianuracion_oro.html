@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulador de lixiviación de oro por cianuración</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--bg:#eef1ee;--panel:#fff;--ink:#1d2a26;--mute:#5d6b66;--line:#d3dad6;--accent:#1f5c4d;--q:#c0562b;--m:#2a6fb0;--d:#7a8f1c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
+header{background:var(--accent);color:#fff;padding:20px 28px}
+header h1{margin:0;font-size:1.4rem;font-weight:600}
+header p{margin:4px 0 0;opacity:.85;font-size:.9rem}
+main{display:grid;grid-template-columns:340px 1fr;gap:20px;padding:20px 28px;max-width:1400px;margin:auto}
+@media(max-width:900px){main{grid-template-columns:1fr;padding:14px}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:18px}
+h2{margin:0 0 12px;font-size:1.05rem}
+.ctl{margin-bottom:16px}
+.ctl label{display:flex;justify-content:space-between;font-weight:600;font-size:.9rem}
+.ctl output{color:var(--accent);font-variant-numeric:tabular-nums}
+.ctl input{width:100%;accent-color:var(--accent);margin-top:6px}
+.ctl small{color:var(--mute)}
+.right{display:flex;flex-direction:column;gap:20px}
+.chartbox{position:relative;height:380px}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+th{background:#f5f7f5;font-weight:600}
+td.v{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+@media(max-width:1100px){.grid2{grid-template-columns:1fr}}
+.sw{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:6px}
+.note{background:#f5f7f5;border-left:4px solid var(--accent);padding:10px 12px;margin-top:12px;font-size:.9rem}
+.foot{color:var(--mute);font-size:.8rem;margin-top:10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Simulador de lixiviación de oro por cianuración</h1>
+  <p>Cinética de núcleo decreciente, transferencia de masa y difusión en capa de producto, con balance de reactivos y dimensionamiento de tanques.</p>
+</header>
+<main>
+  <section>
+    <h2>Parámetros operativos</h2>
+    <div class="ctl"><label>Capacidad de planta <output id="o_cap"></output></label><input type="range" id="cap" min="20" max="40" step="1" value="30"><small>20 – 40 t/día</small></div>
+    <div class="ctl"><label>Tiempo de residencia <output id="o_tau"></output></label><input type="range" id="tau" min="24" max="48" step="1" value="36"><small>24 – 48 h</small></div>
+    <div class="ctl"><label>Sólidos en la pulpa <output id="o_sol"></output></label><input type="range" id="sol" min="40" max="50" step="1" value="45"><small>40 – 50 %</small></div>
+    <div class="ctl"><label>NaCN libre <output id="o_cn"></output></label><input type="range" id="cn" min="300" max="500" step="10" value="400"><small>300 – 500 mg/L</small></div>
+    <div class="ctl"><label>Oxígeno disuelto <output id="o_o2"></output></label><input type="range" id="o2" min="6" max="10" step="0.5" value="8"><small>6 – 10 mg/L</small></div>
+    <div class="ctl"><label>Temperatura <output id="o_T"></output></label><input type="range" id="T" min="20" max="80" step="1" value="25"><small>20 – 80 °C</small></div>
+    <div class="foot">Condiciones de referencia del modelo: 25 °C, 400 mg/L NaCN, 8 mg/L O₂. Densidad del sólido supuesta: 2,7 t/m³.</div>
+  </section>
+
+  <div class="right">
+    <section>
+      <h2>Fracción de oro reaccionada (α) vs. tiempo</h2>
+      <div class="chartbox"><canvas id="chart"></canvas></div>
+      <div class="note" id="diag"></div>
+    </section>
+
+    <div class="grid2">
+      <section>
+        <h2>Balance de masa y diseño</h2>
+        <table id="tblDiseno"></table>
+      </section>
+      <section>
+        <h2>Constantes y resultados cinéticos</h2>
+        <table id="tblCin"></table>
+        <div class="foot">k = A·exp(−E/RT)·(C<sub>CN</sub>/400)<sup>n</sup>·(C<sub>O₂</sub>/8)<sup>m</sup>. Modelo semiempírico; calibre A, E, n y m con sus datos de laboratorio.</div>
+      </section>
+    </div>
+  </div>
+</main>
+
+<script>
+// ---------- Parámetros del modelo (editables) ----------
+const R = 8.314;            // J/mol·K
+const T_REF = 298.15;       // K
+const CN_REF = 400, O2_REF = 8;
+const RHO_S = 2.7;          // t/m3 sólido
+const RHO_L = 1.0;          // t/m3 solución
+const NACN_KG_T = 0.5, CAL_KG_T = 1.2;
+const FREEBOARD = 0.85;     // factor de llenado útil
+// k_ref [1/h] a condiciones de referencia, energía de activación [J/mol], órdenes respecto a CN y O2
+const MODELS = {
+  q: {name:'Reacción química (núcleo decreciente)', color:'#c0562b', kref:0.020, E:45000, nCN:0.5, nO2:0.5, eq:'1 − (1−α)^(1/3) = k·t'},
+  m: {name:'Transferencia de masa (1.er orden)',     color:'#2a6fb0', kref:0.100, E:15000, nCN:1.0, nO2:1.0, eq:'−ln(1−α) = k·t'},
+  d: {name:'Difusión en capa de producto (CGB)',      color:'#7a8f1c', kref:0.008, E:25000, nCN:0.5, nO2:0.5, eq:'1 − ⅔α − (1−α)^(2/3) = k·t'}
+};
+
+// ---------- Cinética ----------
+function kConst(M, T, cn, o2){
+  const A = M.kref / Math.exp(-M.E/(R*T_REF));          // factor preexponencial
+  return A*Math.exp(-M.E/(R*T)) * Math.pow(cn/CN_REF, M.nCN) * Math.pow(o2/O2_REF, M.nO2);
+}
+const alphaQ = (k,t)=>{const x=Math.min(k*t,1); return 1-Math.pow(1-x,3);};
+const alphaM = (k,t)=>1-Math.exp(-k*t);
+const fCGB = a=>1-2/3*a-Math.pow(1-a,2/3);
+function alphaD(k,t){
+  const y=k*t; if(y>=1/3) return 1;
+  let lo=0,hi=1;
+  for(let i=0;i<60;i++){const mid=(lo+hi)/2; fCGB(mid)<y?lo=mid:hi=mid;}
+  return (lo+hi)/2;
+}
+const FN = {q:alphaQ, m:alphaM, d:alphaD};
+
+// ---------- UI ----------
+const $=id=>document.getElementById(id);
+const fmt=(x,d=2)=>x.toLocaleString('es-CO',{minimumFractionDigits:d,maximumFractionDigits:d});
+const ids=['cap','tau','sol','cn','o2','T'];
+const units={cap:' t/día',tau:' h',sol:' %',cn:' mg/L',o2:' mg/L',T:' °C'};
+
+let chart;
+function initChart(){
+  chart=new Chart($('chart'),{
+    type:'line',
+    data:{datasets:Object.keys(MODELS).map(k=>({label:MODELS[k].name,borderColor:MODELS[k].color,backgroundColor:MODELS[k].color,borderWidth:2.5,pointRadius:0,tension:.15,data:[]}))},
+    options:{
+      responsive:true,maintainAspectRatio:false,animation:false,parsing:false,
+      interaction:{mode:'nearest',axis:'x',intersect:false},
+      scales:{
+        x:{type:'linear',min:0,title:{display:true,text:'Tiempo (h)'}},
+        y:{min:0,max:1,title:{display:true,text:'Fracción reaccionada α'}}
+      },
+      plugins:{legend:{position:'bottom'},tooltip:{callbacks:{label:c=>`${c.dataset.label}: α = ${c.parsed.y.toFixed(3)}`,title:i=>`t = ${i[0].parsed.x.toFixed(1)} h`}}}
+    }
+  });
+}
+
+function update(){
+  const v={}; ids.forEach(id=>{v[id]=parseFloat($(id).value); $('o_'+id).textContent=v[id]+units[id];});
+  const T=v.T+273.15;
+
+  // Cinética
+  const ks={}, curves={}, aEnd={};
+  const N=120;
+  Object.keys(MODELS).forEach(key=>{
+    const k=kConst(MODELS[key],T,v.cn,v.o2); ks[key]=k;
+    const pts=[]; for(let i=0;i<=N;i++){const t=v.tau*i/N; pts.push({x:t,y:FN[key](k,t)});}
+    curves[key]=pts; aEnd[key]=FN[key](k,v.tau);
+  });
+  chart.options.scales.x.max=v.tau;
+  Object.keys(MODELS).forEach((key,i)=>chart.data.datasets[i].data=curves[key]);
+  chart.update();
+
+  // Mecanismo limitante: el que alcanza menor α al tiempo de residencia
+  const lim=Object.keys(aEnd).reduce((a,b)=>aEnd[a]<aEnd[b]?a:b);
+  $('diag').innerHTML=`<b>Mecanismo más lento (limitante) a ${v.tau} h:</b> ${MODELS[lim].name}, con α = ${fmt(aEnd[lim]*100,1)} %. `+
+    `Los otros dos modelos alcanzan ${Object.keys(aEnd).filter(k=>k!==lim).map(k=>fmt(aEnd[k]*100,1)+' %').join(' y ')}.`;
+
+  // Balance de masa y diseño
+  const w=v.sol/100;
+  const rhoPulpa=1/(w/RHO_S+(1-w)/RHO_L);         // t/m3
+  const mPulpa=v.cap/w;                            // t pulpa/día
+  const aguaT=v.cap*(1-w)/w;                       // t agua/día
+  const qPulpa=mPulpa/rhoPulpa;                    // m3/día
+  const vUtil=qPulpa*v.tau/24;                     // m3
+  const vTotal=vUtil/FREEBOARD;
+  const nacn=v.cap*NACN_KG_T, cal=v.cap*CAL_KG_T;
+  const rows=[
+    ['Densidad de pulpa',fmt(rhoPulpa,3)+' t/m³'],
+    ['Pulpa alimentada',fmt(mPulpa,1)+' t/día'],
+    ['Agua en la pulpa',fmt(aguaT,1)+' m³/día'],
+    ['Caudal volumétrico de pulpa',fmt(qPulpa,1)+' m³/día ('+fmt(qPulpa/24,2)+' m³/h)'],
+    ['Volumen útil de lixiviación',fmt(vUtil,1)+' m³'],
+    ['Volumen geométrico (85 % llenado)',fmt(vTotal,1)+' m³'],
+    ['Consumo de NaCN (0,5 kg/t)',fmt(nacn,1)+' kg/día'],
+    ['Consumo de cal (1,2 kg/t)',fmt(cal,1)+' kg/día']
+  ];
+  $('tblDiseno').innerHTML='<tr><th>Variable</th><th style="text-align:right">Valor</th></tr>'+rows.map(r=>`<tr><td>${r[0]}</td><td class="v">${r[1]}</td></tr>`).join('');
+
+  // Tabla cinética
+  $('tblCin').innerHTML='<tr><th>Modelo</th><th style="text-align:right">k (h⁻¹)</th><th style="text-align:right">α a '+v.tau+' h</th></tr>'+
+    Object.keys(MODELS).map(key=>`<tr><td><span class="sw" style="background:${MODELS[key].color}"></span>${MODELS[key].name}<br><small style="color:#5d6b66">${MODELS[key].eq}</small></td><td class="v">${ks[key].toExponential(3).replace('.',',')}</td><td class="v">${fmt(aEnd[key]*100,1)} %</td></tr>`).join('');
+}
+
+initChart();
+ids.forEach(id=>$(id).addEventListener('input',update));
+update();
+</script>
+</body>
+</html>
